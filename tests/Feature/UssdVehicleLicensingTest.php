@@ -73,6 +73,120 @@ class UssdVehicleLicensingTest extends TestCase
             ->assertOk()
             ->assertJsonPath('stage', 'session_active')
             ->assertJsonPath('message', "Choose insurance type:\n1. Third Party\n2. Full Cover\n\nReply 0 to cancel.");
+
+        $response = $this->postJson(route('ussd.vehicle-licensing'), $this->payload([
+            'message' => '1',
+            'transactionID' => 'buy-flow',
+        ]));
+
+        $response
+            ->assertOk()
+            ->assertJsonPath('stage', 'session_active')
+            ->assertJsonPath('message', "Vehicle: Toyota Hilux\nInsurance: USD 180.00\nTotal: USD 280.00\n\n1. Continue\n2. Cancel");
+
+        $this->assertStringNotContainsString('Plate:', $response->json('message'));
+        $this->assertStringNotContainsString('Engine:', $response->json('message'));
+        $this->assertStringNotContainsString('ZINARA:', $response->json('message'));
+        $this->assertStringNotContainsString('Radio:', $response->json('message'));
+        $this->assertStringNotContainsString('Owner:', $response->json('message'));
+        $this->assertStringNotContainsString('Expiry:', $response->json('message'));
+        $this->assertStringNotContainsString('Arrears:', $response->json('message'));
+        $this->assertStringNotContainsString('Delivery:', $response->json('message'));
+    }
+
+    public function test_ussd_buy_license_collects_delivery_fields_without_pipes(): void
+    {
+        $this->seed(DatabaseSeeder::class);
+
+        foreach ([
+            ['stage' => 'START', 'message' => ''],
+            ['message' => '1'],
+            ['message' => 'ABC1234'],
+            ['message' => '1'],
+            ['message' => '1'],
+            ['message' => '1'],
+        ] as $step) {
+            $response = $this->postJson(route('ussd.vehicle-licensing'), $this->payload($step + [
+                'transactionID' => 'ussd-buy-fields',
+            ]));
+
+            $this->assertStringNotContainsString('|', $response->json('message'));
+        }
+
+        $response = $this->postJson(route('ussd.vehicle-licensing'), $this->payload([
+            'message' => '1 Samora Machel Avenue',
+            'transactionID' => 'ussd-buy-fields',
+        ]));
+
+        $response
+            ->assertOk()
+            ->assertJsonPath('message', "Enter contact mobile number.\n\nReply 0 to cancel.");
+        $this->assertStringNotContainsString('|', $response->json('message'));
+
+        $response = $this->postJson(route('ussd.vehicle-licensing'), $this->payload([
+            'message' => '263772341693',
+            'transactionID' => 'ussd-buy-fields',
+        ]));
+
+        $response
+            ->assertOk()
+            ->assertJsonPath('message', "Enter delivery landmark or NONE to skip.\n\nReply 0 to cancel.");
+        $this->assertStringNotContainsString('|', $response->json('message'));
+
+        $this->postJson(route('ussd.vehicle-licensing'), $this->payload([
+            'message' => 'NONE',
+            'transactionID' => 'ussd-buy-fields',
+        ]))
+            ->assertOk()
+            ->assertJsonPath('stage', 'COMPLETE')
+            ->assertJsonFragment(['channel' => 'USSD']);
+    }
+
+    public function test_ussd_credit_flow_collects_kyc_fields_without_pipes(): void
+    {
+        $this->seed(DatabaseSeeder::class);
+
+        foreach ([
+            ['stage' => 'START', 'message' => ''],
+            ['message' => '2'],
+            ['message' => 'ABC1234'],
+            ['message' => '1'],
+            ['message' => '1'],
+        ] as $step) {
+            $response = $this->postJson(route('ussd.vehicle-licensing'), $this->payload($step + [
+                'transactionID' => 'ussd-credit-fields',
+            ]));
+
+            $this->assertStringNotContainsString('|', $response->json('message'));
+        }
+
+        $steps = [
+            ['message' => 'Fidelis', 'expected' => "Enter your surname.\n\nReply 0 to cancel."],
+            ['message' => 'Gwokuda', 'expected' => "Enter national ID.\n\nReply 0 to cancel."],
+            ['message' => '63-123456A63', 'expected' => "Enter mobile number.\n\nReply 0 to cancel."],
+            ['message' => '263772341693', 'expected' => "Enter residential address.\n\nReply 0 to cancel."],
+            ['message' => '10 Borrowdale Road', 'expected' => "Enter delivery address.\n\nReply 0 to cancel."],
+            ['message' => '1 Samora Machel Avenue', 'expected' => "Enter delivery mobile number.\n\nReply 0 to cancel."],
+            ['message' => '263772341693', 'expected' => "Enter delivery landmark or NONE to skip.\n\nReply 0 to cancel."],
+        ];
+
+        foreach ($steps as $step) {
+            $response = $this->postJson(route('ussd.vehicle-licensing'), $this->payload([
+                'message' => $step['message'],
+                'transactionID' => 'ussd-credit-fields',
+            ]));
+
+            $response->assertOk()->assertJsonPath('message', $step['expected']);
+            $this->assertStringNotContainsString('|', $response->json('message'));
+        }
+
+        $this->postJson(route('ussd.vehicle-licensing'), $this->payload([
+            'message' => 'NONE',
+            'transactionID' => 'ussd-credit-fields',
+        ]))
+            ->assertOk()
+            ->assertJsonPath('stage', 'COMPLETE')
+            ->assertJsonFragment(['channel' => 'USSD']);
     }
 
     public function test_delivery_tracking_can_complete_session(): void

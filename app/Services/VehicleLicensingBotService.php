@@ -132,7 +132,9 @@ class VehicleLicensingBotService
                 ]),
             ]);
 
-            return $this->active($this->quoteText($quote)."\n\n1. Continue\n2. Cancel");
+            $quoteText = $channel === 'ussd' ? $this->minimalQuoteText($quote) : $this->quoteText($quote);
+
+            return $this->active($quoteText."\n\n1. Continue\n2. Cancel");
         }
 
         if ($session->state === 'quote_confirm') {
@@ -152,7 +154,7 @@ class VehicleLicensingBotService
                 $quote = Quote::with(['items', 'vehicle', 'corporate'])->findOrFail($context['quote_id']);
                 $session->update(['state' => 'menu', 'current_menu' => null, 'context' => []]);
 
-                return $this->complete($this->quoteText($quote));
+                return $this->complete($channel === 'ussd' ? $this->minimalQuoteText($quote) : $this->quoteText($quote));
             }
 
             if ($flow === 'buy') {
@@ -162,6 +164,15 @@ class VehicleLicensingBotService
             }
 
             if ($flow === 'credit') {
+                if ($channel === 'ussd') {
+                    $session->update([
+                        'state' => 'awaiting_credit_name',
+                        'context' => array_merge($context, ['credit_details' => []]),
+                    ]);
+
+                    return $this->active("Enter your first name.\n\nReply 0 to cancel.");
+                }
+
                 $session->update(['state' => 'awaiting_credit_kyc']);
 
                 return $this->active("Send KYC details separated by | as:\nName | Surname | National ID | Mobile | Address | Delivery Address | Delivery Mobile | Landmark\n\nReply 0 to cancel.");
@@ -181,6 +192,15 @@ class VehicleLicensingBotService
                 return $this->active("Invalid payment option.\n1. Mobile Money\n2. Zimswitch card\n3. Visa\n4. Mastercard\n\nReply 0 to cancel.");
             }
 
+            if ($channel === 'ussd') {
+                $session->update([
+                    'state' => 'awaiting_delivery_address',
+                    'context' => array_merge($context, ['payment_method' => $paymentMethod, 'delivery_details' => []]),
+                ]);
+
+                return $this->active("Enter delivery address.\n\nReply 0 to cancel.");
+            }
+
             $session->update([
                 'state' => 'awaiting_delivery',
                 'context' => array_merge($context, ['payment_method' => $paymentMethod]),
@@ -189,7 +209,56 @@ class VehicleLicensingBotService
             return $this->active("Send delivery details separated by | as:\nDelivery Address | Contact Mobile | Landmark\n\nReply 0 to cancel.");
         }
 
+        if ($session->state === 'awaiting_delivery_address') {
+            $session->update([
+                'state' => 'awaiting_delivery_mobile',
+                'context' => array_merge($context, [
+                    'delivery_details' => array_merge($context['delivery_details'] ?? [], [
+                        'delivery_address' => $body,
+                    ]),
+                ]),
+            ]);
+
+            return $this->active("Enter contact mobile number.\n\nReply 0 to cancel.");
+        }
+
+        if ($session->state === 'awaiting_delivery_mobile') {
+            $session->update([
+                'state' => 'awaiting_delivery_landmark',
+                'context' => array_merge($context, [
+                    'delivery_details' => array_merge($context['delivery_details'] ?? [], [
+                        'contact_mobile' => $body,
+                    ]),
+                ]),
+            ]);
+
+            return $this->active("Enter delivery landmark or NONE to skip.\n\nReply 0 to cancel.");
+        }
+
+        if ($session->state === 'awaiting_delivery_landmark') {
+            $details = array_merge($context['delivery_details'] ?? [], [
+                'landmark' => strtolower($body) === 'none' ? null : $body,
+            ]);
+            $quote = Quote::with(['items', 'vehicle', 'corporate'])->findOrFail($context['quote_id']);
+            $payment = $this->payments->pay($quote, $context['payment_method'] ?? 'mobile_money', ['source' => $channel]);
+            $disk = $this->disks->issueFromQuote($quote->fresh(['items', 'vehicle', 'corporate']));
+            $delivery = $this->deliveries->createForQuote($quote, $details, $disk);
+
+            $session->update(['state' => 'menu', 'current_menu' => null, 'context' => []]);
+
+            return $this->complete("License purchased successfully.\nPayment: {$payment->reference}\nDisk: {$disk->reference_number}\nMutero Delivery: ".$this->muteroReference($delivery)."\nDelivery Order: #{$delivery->id}\nStatus: {$delivery->status}");
+        }
+
         if ($session->state === 'awaiting_delivery') {
+            if ($channel === 'ussd') {
+                $session->update([
+                    'state' => 'awaiting_delivery_address',
+                    'context' => array_merge($context, ['delivery_details' => []]),
+                ]);
+
+                return $this->active("Enter delivery address.\n\nReply 0 to cancel.");
+            }
+
             $parts = array_map('trim', explode('|', $body));
 
             if (count($parts) < 2 || $parts[0] === '' || $parts[1] === '') {
@@ -210,7 +279,105 @@ class VehicleLicensingBotService
             return $this->complete("License purchased successfully.\nPayment: {$payment->reference}\nDisk: {$disk->reference_number}\nMutero Delivery: ".$this->muteroReference($delivery)."\nDelivery Order: #{$delivery->id}\nStatus: {$delivery->status}");
         }
 
+        if ($session->state === 'awaiting_credit_name') {
+            $session->update([
+                'state' => 'awaiting_credit_surname',
+                'context' => array_merge($context, [
+                    'credit_details' => array_merge($context['credit_details'] ?? [], ['name' => $body]),
+                ]),
+            ]);
+
+            return $this->active("Enter your surname.\n\nReply 0 to cancel.");
+        }
+
+        if ($session->state === 'awaiting_credit_surname') {
+            $session->update([
+                'state' => 'awaiting_credit_national_id',
+                'context' => array_merge($context, [
+                    'credit_details' => array_merge($context['credit_details'] ?? [], ['surname' => $body]),
+                ]),
+            ]);
+
+            return $this->active("Enter national ID.\n\nReply 0 to cancel.");
+        }
+
+        if ($session->state === 'awaiting_credit_national_id') {
+            $session->update([
+                'state' => 'awaiting_credit_mobile',
+                'context' => array_merge($context, [
+                    'credit_details' => array_merge($context['credit_details'] ?? [], ['national_id' => $body]),
+                ]),
+            ]);
+
+            return $this->active("Enter mobile number.\n\nReply 0 to cancel.");
+        }
+
+        if ($session->state === 'awaiting_credit_mobile') {
+            $session->update([
+                'state' => 'awaiting_credit_address',
+                'context' => array_merge($context, [
+                    'credit_details' => array_merge($context['credit_details'] ?? [], ['mobile_number' => $body]),
+                ]),
+            ]);
+
+            return $this->active("Enter residential address.\n\nReply 0 to cancel.");
+        }
+
+        if ($session->state === 'awaiting_credit_address') {
+            $session->update([
+                'state' => 'awaiting_credit_delivery_address',
+                'context' => array_merge($context, [
+                    'credit_details' => array_merge($context['credit_details'] ?? [], ['address' => $body]),
+                ]),
+            ]);
+
+            return $this->active("Enter delivery address.\n\nReply 0 to cancel.");
+        }
+
+        if ($session->state === 'awaiting_credit_delivery_address') {
+            $session->update([
+                'state' => 'awaiting_credit_delivery_mobile',
+                'context' => array_merge($context, [
+                    'credit_details' => array_merge($context['credit_details'] ?? [], ['delivery_address' => $body]),
+                ]),
+            ]);
+
+            return $this->active("Enter delivery mobile number.\n\nReply 0 to cancel.");
+        }
+
+        if ($session->state === 'awaiting_credit_delivery_mobile') {
+            $session->update([
+                'state' => 'awaiting_credit_delivery_landmark',
+                'context' => array_merge($context, [
+                    'credit_details' => array_merge($context['credit_details'] ?? [], ['delivery_mobile' => $body]),
+                ]),
+            ]);
+
+            return $this->active("Enter delivery landmark or NONE to skip.\n\nReply 0 to cancel.");
+        }
+
+        if ($session->state === 'awaiting_credit_delivery_landmark') {
+            $details = array_merge($context['credit_details'] ?? [], [
+                'delivery_landmark' => strtolower($body) === 'none' ? null : $body,
+            ]);
+            $quote = Quote::with(['vehicle'])->findOrFail($context['quote_id']);
+            $application = $this->credits->create($quote, $details);
+
+            $session->update(['state' => 'menu', 'current_menu' => null, 'context' => []]);
+
+            return $this->complete("Credit application submitted.\nApplication: #{$application->id}\nStatus: Pending admin approval.");
+        }
+
         if ($session->state === 'awaiting_credit_kyc') {
+            if ($channel === 'ussd') {
+                $session->update([
+                    'state' => 'awaiting_credit_name',
+                    'context' => array_merge($context, ['credit_details' => []]),
+                ]);
+
+                return $this->active("Enter your first name.\n\nReply 0 to cancel.");
+            }
+
             $parts = array_map('trim', explode('|', $body));
 
             if (count($parts) < 7) {
@@ -298,6 +465,20 @@ class VehicleLicensingBotService
             ($insuranceItem?->description ?? 'Insurance').': '.$money($amount('motor_insurance')),
             'Arrears: '.$money($amount('arrears')),
             'Delivery: '.$money($amount('delivery_fee')),
+            'Total: '.$money($quote->total_cents),
+        ]);
+    }
+
+    public function minimalQuoteText(Quote $quote): string
+    {
+        $quote->loadMissing(['items', 'vehicle']);
+
+        $insurance = (int) ($quote->items->firstWhere('fee_type', 'motor_insurance')?->amount_cents ?? 0);
+        $money = fn (int $cents) => 'USD '.number_format($cents / 100, 2);
+
+        return implode("\n", [
+            'Vehicle: '.$quote->vehicle->make.' '.$quote->vehicle->model,
+            'Insurance: '.$money($insurance),
             'Total: '.$money($quote->total_cents),
         ]);
     }
