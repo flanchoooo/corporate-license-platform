@@ -1,3 +1,15 @@
+FROM node:20-alpine AS assets
+
+WORKDIR /app
+
+COPY package.json package-lock.json ./
+RUN npm ci
+
+COPY resources ./resources
+COPY public ./public
+COPY vite.config.js postcss.config.js tailwind.config.js ./
+RUN npm run build
+
 FROM php:8.2-cli
 
 WORKDIR /var/www/html
@@ -30,6 +42,7 @@ COPY composer.json composer.lock ./
 RUN composer install --no-dev --no-interaction --prefer-dist --optimize-autoloader --no-scripts
 
 COPY . .
+COPY --from=assets /app/public/build ./public/build
 
 RUN rm -f bootstrap/cache/*.php \
     && cp .env.example .env \
